@@ -4,6 +4,9 @@
 #include "7zip/C/7zFile.h"
 #include <iostream>
 #include <fstream>
+#include <sys/stat.h>
+#include <string>
+#include <vector>
 
 void *_AllocImp(ISzAllocPtr p, size_t size) {
   return malloc(size);
@@ -23,6 +26,9 @@ class Archive {
   CSzArEx db;
   ISzAlloc allocImp = AllocImp;
   ISzAlloc allocTempImp = AllocImp;
+  uint32_t lastBlockIndex = 0xFFFFFFFF;
+  Byte* cachedBuffer = nullptr;
+  size_t cachedBufferSize = 0;
 
 public:
   ArchiveStatus status = kArchiveOK;
@@ -39,7 +45,8 @@ public:
     lookStream.bufSize = 16 * 1024;
     LookToRead2_CreateVTable(&lookStream, False);
     SzArEx_Init(&db);
-    if (const auto res = SzArEx_Open(&db, &lookStream.vt, &allocImp, &allocTempImp); res != SZ_OK) {
+    const SRes openRes = SzArEx_Open(&db, &lookStream.vt, &allocImp, &allocTempImp);
+    if (openRes != SZ_OK) {
       status = kArchiveOpenError;
       File_Close(&archiveStream.file);
     }
@@ -49,6 +56,7 @@ public:
     SzArEx_Free(&db, &allocImp);
     File_Close(&archiveStream.file);
     delete [] lookStream.buf;
+    _FreeImp(&allocImp, cachedBuffer);
   }
 
   uint32_t numFiles() const {
@@ -76,67 +84,53 @@ public:
     } else {
       archiveFile.crc32 = 0;
     }
-    
-    if (db.CTime.Defs != nullptr) {
-      if (db.CTime.Defs[index]) {
-        auto [Low, High] = db.CTime.Vals[index];
-        archiveFile.cTime = Low + (static_cast<uint64_t>(High) << 32);
-      } else {
-        archiveFile.cTime = 0;
-      }
-    } else {
-      archiveFile.cTime = 0;
+
+    archiveFile.cTime = 0;
+    if (db.CTime.Defs != nullptr && db.CTime.Defs[index]) {
+      const UInt64 Low = db.CTime.Vals[index].Low;
+      const UInt64 High = db.CTime.Vals[index].High;
+      archiveFile.cTime = Low + (High << 32);
     }
 
-    if (db.MTime.Defs != nullptr) {
-      if (db.MTime.Defs[index]) {
-        auto [Low, High] = db.MTime.Vals[index];
-        archiveFile.mTime = Low + (static_cast<uint64_t>(High) << 32);
-      } else {
-        archiveFile.mTime = 0;
-      }
-    } else {
-      archiveFile.mTime = 0;
+    archiveFile.mTime = 0;
+    if (db.MTime.Defs != nullptr && db.MTime.Defs[index]) {
+      const UInt64 Low = db.MTime.Vals[index].Low;
+      const UInt64 High = db.MTime.Vals[index].High;
+      archiveFile.mTime = Low + (High << 32);
     }
 
     return archiveFile;
   }
 
-  unsigned char* readFile(const uint32_t index) const {
+  unsigned char* readFile(const uint32_t index) {
     const ArchiveFile archiveFile = getFileByIndex(index);
     if (archiveFile.is_dir) {
       return nullptr;
     }
     auto* buffer = new unsigned char[archiveFile.size];
     size_t read = 0;
-    uint32_t blockIndex;
-    Byte* outBuffer = nullptr;
-    size_t outBufferSize;
     size_t offset;
     size_t outSizeProcessed;
     while (read < archiveFile.size) {
-      if (const auto res = SzArEx_Extract(&db, &lookStream.vt, index, &blockIndex, &outBuffer, &outBufferSize, &offset, &outSizeProcessed, &allocImp, &allocTempImp); res != SZ_OK) {
+      const SRes res = SzArEx_Extract(&db, &lookStream.vt, index, &lastBlockIndex, &cachedBuffer, &cachedBufferSize, &offset, &outSizeProcessed, &allocImp, &allocTempImp);
+      if (res != SZ_OK) {
         delete[] buffer;
         return nullptr;
       }
       for (auto i = offset; i < outSizeProcessed + offset; i++) {
-        buffer[read] = outBuffer[i];
+        buffer[read] = cachedBuffer[i];
         read++;
       }
-      _FreeImp(&allocImp, outBuffer);
     }
     return buffer;
   }
 
-  ArchiveStatus extractFileToPath(const uint32_t index, const char* path) const {
+  ArchiveStatus extractFileToPath(const uint32_t index, const char* path) {
     const ArchiveFile archiveFile = getFileByIndex(index);
     if (archiveFile.is_dir) {
       return kArchiveReadError;
     }
     size_t read = 0;
-    uint32_t blockIndex;
-    Byte* outBuffer = nullptr;
-    size_t outBufferSize;
     size_t offset;
     size_t outSizeProcessed;
     std::ofstream outFile;
@@ -148,16 +142,74 @@ public:
       return kArchiveOpenError;
     }
     while (read < archiveFile.size) {
-      if (const auto res = SzArEx_Extract(&db, &lookStream.vt, index, &blockIndex, &outBuffer, &outBufferSize, &offset, &outSizeProcessed, &allocImp, &allocTempImp); res != SZ_OK) {
+      const SRes res = SzArEx_Extract(&db, &lookStream.vt, index, &lastBlockIndex, &cachedBuffer, &cachedBufferSize, &offset, &outSizeProcessed, &allocImp, &allocTempImp);
+      if (res != SZ_OK) {
         outFile.close();
         return ArchiveStatus::kArchiveReadError;
       }
-      outFile.write(reinterpret_cast<const char *>(outBuffer+offset), outSizeProcessed);
+      outFile.write(reinterpret_cast<const char *>(cachedBuffer+offset), outSizeProcessed);
       read += outSizeProcessed;
-      _FreeImp(&allocImp, outBuffer);
     }
     outFile.close();
     return kArchiveOK;
+  }
+
+  int extractToDir(const uint32_t index, const char* outputDir) {
+    const ArchiveFile file = getFileByIndex(index);
+
+    std::string outPath = std::string(outputDir) + "/";
+    const uint16_t* src = file.name;
+    while (*src) {
+      if (*src < 0x80) {
+        outPath += static_cast<char>(*src);
+      } else if (*src < 0x800) {
+        outPath += static_cast<char>(0xC0 | (*src >> 6));
+        outPath += static_cast<char>(0x80 | (*src & 0x3F));
+      } else {
+        outPath += static_cast<char>(0xE0 | (*src >> 12));
+        outPath += static_cast<char>(0x80 | ((*src >> 6) & 0x3F));
+        outPath += static_cast<char>(0x80 | (*src & 0x3F));
+      }
+      src++;
+    }
+    delete[] file.name;
+
+    if (file.is_dir) {
+      size_t pos = 0;
+      while ((pos = outPath.find_first_of('/', pos)) != std::string::npos) {
+        std::string dir = outPath.substr(0, pos);
+        if (!dir.empty()) mkdir(dir.c_str(), 0755);
+        pos++;
+      }
+      mkdir(outPath.c_str(), 0755);
+      return 1;
+    }
+
+    size_t pos = 0;
+    while ((pos = outPath.find_first_of('/', pos)) != std::string::npos) {
+      std::string dir = outPath.substr(0, pos);
+      mkdir(dir.c_str(), 0755);
+      pos++;
+    }
+
+    size_t read = 0;
+    size_t offset;
+    size_t outSizeProcessed;
+    std::ofstream outFile;
+    outFile.open(outPath, std::ios::binary | std::ios::out);
+    if (!outFile.is_open()) return 2;
+
+    while (read < file.size) {
+      const SRes res = SzArEx_Extract(&db, &lookStream.vt, index, &lastBlockIndex, &cachedBuffer, &cachedBufferSize, &offset, &outSizeProcessed, &allocImp, &allocTempImp);
+      if (res != SZ_OK) {
+        outFile.close();
+        return 3;
+      }
+      outFile.write(reinterpret_cast<const char *>(cachedBuffer+offset), outSizeProcessed);
+      read += outSizeProcessed;
+    }
+    outFile.close();
+    return 0;
   }
 };
 
@@ -199,4 +251,9 @@ FFI_PLUGIN_EXPORT void freeReadData(void* p) {
 FFI_PLUGIN_EXPORT ArchiveStatus extractArchiveToFile(void* archive, uint32_t index, const char* path) {
   const auto a = static_cast<Archive *>(archive);
   return a->extractFileToPath(index, path);
+}
+
+FFI_PLUGIN_EXPORT int extractFileToDir(void* archive, uint32_t index, const char* outputDir) {
+  const auto a = static_cast<Archive *>(archive);
+  return a->extractToDir(index, outputDir);
 }
