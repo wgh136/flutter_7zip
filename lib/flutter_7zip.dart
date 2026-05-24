@@ -107,15 +107,27 @@ class SZArchive {
   /// Extract the file at the given [index] to a file at the given [path].
   void extractToFile(int index, String path) {
     var p = path.toNativeUtf8();
-    var file = File(path);
-    if (!file.existsSync()) {
-      file.createSync(recursive: true);
+    if (!File(path).parent.existsSync()) {
+      File(path).parent.createSync(recursive: true);
     }
     final status = _bindings.extractArchiveToFile(_archive, index, p.cast());
     malloc.free(p);
     if (status != ArchiveStatus.kArchiveOK) {
       throw Exception('Failed to extract file to $path.');
     }
+  }
+
+  /// Extract file by [index] to [outputDir], creating subdirs as needed.
+  /// Returns true if entry was a directory (already created).
+  /// Throws on error.
+  bool extractToDir(int index, String outputDir) {
+    var p = outputDir.toNativeUtf8();
+    final result = _bindings.extractFileToDir(_archive, index, p.cast());
+    malloc.free(p);
+    if (result < 0 || result > 1) {
+      throw Exception('Failed to extract file index $index (code=$result)');
+    }
+    return result == 1;
   }
 
   /// Open an archive at the given [path].

@@ -164,6 +164,25 @@ class Flutter7zipBindings {
               ffi.Pointer<ffi.Char>)>>('extractArchiveToFile');
   late final _extractArchiveToFile = _extractArchiveToFilePtr.asFunction<
       int Function(ffi.Pointer<ffi.Void>, int, ffi.Pointer<ffi.Char>)>();
+
+  int extractFileToDir(
+    ffi.Pointer<ffi.Void> archive,
+    int index,
+    ffi.Pointer<ffi.Char> outputDir,
+  ) {
+    return _extractFileToDir(
+      archive,
+      index,
+      outputDir,
+    );
+  }
+
+  late final _extractFileToDirPtr = _lookup<
+      ffi.NativeFunction<
+          ffi.Int Function(ffi.Pointer<ffi.Void>, ffi.Uint32,
+              ffi.Pointer<ffi.Char>)>>('extractFileToDir');
+  late final _extractFileToDir = _extractFileToDirPtr.asFunction<
+      int Function(ffi.Pointer<ffi.Void>, int, ffi.Pointer<ffi.Char>)>();
 }
 
 final class ArchiveFile extends ffi.Struct {

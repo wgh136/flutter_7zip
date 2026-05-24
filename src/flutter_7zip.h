@@ -45,6 +45,10 @@ extern "C" {
   FFI_PLUGIN_EXPORT void freeReadData(void* p);
 
   FFI_PLUGIN_EXPORT ArchiveStatus extractArchiveToFile(void* archive, uint32_t index, const char* path);
+
+  // Extract file by index to dir, creating subdirectories as needed.
+  // Returns 0 on success, 1 if entry is a directory (already created), >1 on error.
+  FFI_PLUGIN_EXPORT int extractFileToDir(void* archive, uint32_t index, const char* outputDir);
 #ifdef __cplusplus
 };
 #endif
