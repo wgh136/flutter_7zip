@@ -102,42 +102,35 @@ public:
     return archiveFile;
   }
 
-  unsigned char* readFile(const uint32_t index) const {
+  unsigned char* readFile(const uint32_t index) {
     const ArchiveFile archiveFile = getFileByIndex(index);
     if (archiveFile.is_dir) {
       return nullptr;
     }
     auto* buffer = new unsigned char[archiveFile.size];
     size_t read = 0;
-    uint32_t blockIndex;
-    Byte* outBuffer = nullptr;
-    size_t outBufferSize;
     size_t offset;
     size_t outSizeProcessed;
     while (read < archiveFile.size) {
-      const SRes res = SzArEx_Extract(&db, &lookStream.vt, index, &blockIndex, &outBuffer, &outBufferSize, &offset, &outSizeProcessed, &allocImp, &allocTempImp);
+      const SRes res = SzArEx_Extract(&db, &lookStream.vt, index, &lastBlockIndex, &cachedBuffer, &cachedBufferSize, &offset, &outSizeProcessed, &allocImp, &allocTempImp);
       if (res != SZ_OK) {
         delete[] buffer;
         return nullptr;
       }
       for (auto i = offset; i < outSizeProcessed + offset; i++) {
-        buffer[read] = outBuffer[i];
+        buffer[read] = cachedBuffer[i];
         read++;
       }
-      _FreeImp(&allocImp, outBuffer);
     }
     return buffer;
   }
 
-  ArchiveStatus extractFileToPath(const uint32_t index, const char* path) const {
+  ArchiveStatus extractFileToPath(const uint32_t index, const char* path) {
     const ArchiveFile archiveFile = getFileByIndex(index);
     if (archiveFile.is_dir) {
       return kArchiveReadError;
     }
     size_t read = 0;
-    uint32_t blockIndex;
-    Byte* outBuffer = nullptr;
-    size_t outBufferSize;
     size_t offset;
     size_t outSizeProcessed;
     std::ofstream outFile;
@@ -149,14 +142,13 @@ public:
       return kArchiveOpenError;
     }
     while (read < archiveFile.size) {
-      const SRes res = SzArEx_Extract(&db, &lookStream.vt, index, &blockIndex, &outBuffer, &outBufferSize, &offset, &outSizeProcessed, &allocImp, &allocTempImp);
+      const SRes res = SzArEx_Extract(&db, &lookStream.vt, index, &lastBlockIndex, &cachedBuffer, &cachedBufferSize, &offset, &outSizeProcessed, &allocImp, &allocTempImp);
       if (res != SZ_OK) {
         outFile.close();
         return ArchiveStatus::kArchiveReadError;
       }
-      outFile.write(reinterpret_cast<const char *>(outBuffer+offset), outSizeProcessed);
+      outFile.write(reinterpret_cast<const char *>(cachedBuffer+offset), outSizeProcessed);
       read += outSizeProcessed;
-      _FreeImp(&allocImp, outBuffer);
     }
     outFile.close();
     return kArchiveOK;

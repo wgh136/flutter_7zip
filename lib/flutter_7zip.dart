@@ -28,12 +28,41 @@ final Flutter7zipBindings _bindings = Flutter7zipBindings(_dylib);
 final _nativeFreeDataFunc =
     _dylib.lookup<NativeFunction<Void Function(Pointer<Void>)>>('freeReadData');
 
+/// Timing statistics for a single extraction operation.
+class FileExtractStat {
+  /// Index of the file in the archive.
+  final int fileIndex;
+
+  /// Whether this entry was a directory.
+  final bool isDirectory;
+
+  /// Elapsed milliseconds for this single file extraction.
+  final int elapsedMs;
+
+  const FileExtractStat(this.fileIndex, this.isDirectory, this.elapsedMs);
+}
+
+/// Wrapper around [SZArchive.extract] return value.
+class ArchiveExtractResult {
+  /// Total elapsed milliseconds for the entire extraction.
+  final int totalElapsedMs;
+
+  /// Number of files extracted.
+  final int totalFiles;
+
+  const ArchiveExtractResult(this.totalElapsedMs, this.totalFiles);
+
+  @override
+  String toString() => '${totalFiles}files/${totalElapsedMs}ms';
+}
+
 class SZArchive {
   final Pointer<Void> _archive;
+  final _pointers = <Pointer>[];
+  final Stopwatch _stopwatch = Stopwatch();
+  final List<FileExtractStat> _fileStats = [];
 
   SZArchive._(this._archive);
-
-  final _pointers = <Pointer>[];
 
   /// Dispose the archive and free all resources.
   void dispose() {
@@ -41,6 +70,18 @@ class SZArchive {
     for (var p in _pointers) {
       malloc.free(p);
     }
+  }
+
+  /// Total elapsed milliseconds spent extracting files from this archive.
+  int get elapsedMs => _stopwatch.elapsedMilliseconds;
+
+  /// Per-file extraction statistics collected since opening.
+  List<FileExtractStat> get fileStats => List.unmodifiable(_fileStats);
+
+  /// Reset timing counters.
+  void resetTiming() {
+    _stopwatch.reset();
+    _fileStats.clear();
   }
 
   /// Get the number of files in the archive.
@@ -121,12 +162,17 @@ class SZArchive {
   /// Returns true if entry was a directory (already created).
   /// Throws on error.
   bool extractToDir(int index, String outputDir) {
+    _stopwatch.start();
+    final before = _stopwatch.elapsedMilliseconds;
     var p = outputDir.toNativeUtf8();
     final result = _bindings.extractFileToDir(_archive, index, p.cast());
     malloc.free(p);
     if (result < 0 || result > 1) {
+      _stopwatch.stop();
       throw Exception('Failed to extract file index $index (code=$result)');
     }
+    final after = _stopwatch.elapsedMilliseconds;
+    _fileStats.add(FileExtractStat(index, result == 1, after - before));
     return result == 1;
   }
 
@@ -145,30 +191,29 @@ class SZArchive {
   }
 
   /// Extract the archive at the given [archivePath] to the given [outputPath].
-  /// 
-  /// The method is synchronous and will block the main thread.
-  static void extract(String archivePath, String outputPath) {
+  ///
+  /// Returns [ArchiveExtractResult] with total timing and file count.
+  static ArchiveExtractResult extract(String archivePath, String outputPath) {
+    final sw = Stopwatch()..start();
     var archive = open(archivePath);
-    for (var i = 0; i < archive.numFiles; i++) {
-      var file = archive.getFile(i);
-      var outPath = outputPath + Platform.pathSeparator + file.name;
-      if (file.isDirectory) {
-        Directory(outPath).createSync(recursive: true);
-      } else {
-        archive.extractToFile(i, outPath);
-      }
+    var total = archive.numFiles;
+    for (var i = 0; i < total; i++) {
+      archive.extractToDir(i, outputPath);
     }
     archive.dispose();
+    sw.stop();
+    return ArchiveExtractResult(sw.elapsedMilliseconds, total);
   }
 
   /// Extract the archive at the given [archivePath] to the given [outputPath] with [isolatesCount] isolates.
-  /// 
+  ///
   /// The method is asynchronous and will not block the main thread.
-  static Future<void> extractIsolates(
+  static Future<ArchiveExtractResult> extractIsolates(
     String archivePath,
     String outputPath,
     int isolatesCount,
   ) async {
+    final sw = Stopwatch()..start();
     var archive = open(archivePath);
     var total = archive.numFiles;
     var filesPerIsolate = total ~/ isolatesCount;
@@ -184,6 +229,8 @@ class SZArchive {
       ));
     }
     await Future.wait(futures);
+    sw.stop();
+    return ArchiveExtractResult(sw.elapsedMilliseconds, total);
   }
 
   static Future<void> _extractIsolate(
@@ -195,13 +242,7 @@ class SZArchive {
     return Isolate.run(() {
       var archive = open(archivePath);
       for (var i = start; i < end; i++) {
-        var file = archive.getFile(i);
-        var outPath = outputPath + Platform.pathSeparator + file.name;
-        if (file.isDirectory) {
-          Directory(outPath).createSync(recursive: true);
-        } else {
-          archive.extractToFile(i, outPath);
-        }
+        archive.extractToDir(i, outputPath);
       }
       archive.dispose();
     });
